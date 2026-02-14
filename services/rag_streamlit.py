@@ -3,7 +3,7 @@ from datetime import datetime
 import pandas as pd
 import os
 import re
-from services.rag import safe_rag_query, build_index_all, _read_org_info, match_corporate_card, format_question_with_enter
+from rag import rag_answer, build_index, _read_org_info, match_corporate_card, format_question_with_enter
 
 def yellow_highliter(cardlog, doclog):
     #cardlog 데이터프레임에 "승인번호" 행과 doclog 데이터프레임에 "승인번호"가 일치하는 경우
@@ -45,7 +45,7 @@ def blue_highliter(doclog):
 
 
 def team_leader_finder(team_leader_name):
-    csv_path = "/Users/tarrtarr/Desktop/programming/corpcardAudit/data/vectorstore/org_info.csv"
+    csv_path = os.path.join(os.path.dirname(__file__), "..", "data", "vectorstore", "org_info.csv")
     
     # CSV 파일 읽기
     df = pd.read_csv(csv_path, encoding='utf-8-sig')
@@ -125,7 +125,7 @@ def make_highlight_func(red_inx_arr, yellow_idx_arr, blue_idx_arr):
         if row.승인번호 in yellow_idx_arr:
             print("yellow>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
             return ["background-color: #ffff99"] * len(row)
-        
+
         if row.기본적요 in blue_idx_arr:
             return ["background-color: #9dbefa"] * len(row)
 
@@ -160,7 +160,7 @@ with tab1:
     
     if submit and question:
         question = format_question_with_enter(question)
-        answer = safe_rag_query(question)
+        answer = rag_answer(question)
         st.session_state.history.append((question, answer))
         st.markdown("### 🤖 답변")
         st.write(answer)
@@ -246,7 +246,7 @@ with tab2:
                 expense_df = pd.read_csv(expense_file, encoding='utf-8-sig')
                 
                 # limits.csv 로드
-                limits_path = "data/vectorstore/limits.csv"
+                limits_path = os.path.join(os.path.dirname(__file__), "..", "data", "vectorstore", "limits.csv")
                 if os.path.exists(limits_path):
                     limits_df = pd.read_csv(limits_path, encoding='utf-8-sig')
                     #st.success(f"✅ limits.csv 로드 완료 ({len(limits_df)}개 항목)")
@@ -377,13 +377,13 @@ with tab3:
     with col1:
         if st.button("🔄 색인 재빌드", use_container_width=True):
             with st.spinner("재빌드 중..."):
-                build_index_all()
+                build_index()
                 st.success("✅ 색인 재빌드 완료")
     
     with col2:
         if st.button("📁 히든/정정 파일 확인", use_container_width=True):
-            hidden_dir = "data/vectorstore/hidden"
-            correction_dir = "data/vectorstore/correction"
+            hidden_dir = "../data/vectorstore/hidden"
+            correction_dir = "../data/vectorstore/correction"
             
             if os.path.exists(hidden_dir):
                 st.info(f"Hidden: {os.listdir(hidden_dir)}")
@@ -400,14 +400,14 @@ with tab3:
         test_query = st.text_input("테스트 질의:")
         if st.button("🧪 테스트", use_container_width=True):
             if test_query:
-                result = safe_rag_query(test_query, show_sources=True)
+                result = rag_answer(test_query, show_sources=True)
                 st.write(result)
     
     st.divider()
     
     # limits.csv 미리보기
     st.markdown("### 💰 한도 설정 (limits.csv)")
-    limits_path = "data/vectorstore/limits.csv"
+    limits_path = os.path.join(os.path.dirname(__file__), "..", "data", "vectorstore", "limits.csv")
     if os.path.exists(limits_path):
         limits_preview = pd.read_csv(limits_path, encoding='utf-8-sig')
         st.dataframe(limits_preview, use_container_width=True, height=200)
