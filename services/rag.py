@@ -1,6 +1,8 @@
 # services/rag.py
 from __future__ import annotations
 import os, glob, csv, re, calendar
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 from datetime import date, timedelta
 from typing import Optional, List, Tuple, Dict
 
@@ -23,31 +25,28 @@ def _make_openai_client() -> Optional["_OpenAI"]:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
-    http_proxy  = os.getenv("HTTP_PROXY")  or os.getenv("http_proxy")
-    https_proxy = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
-    if http_proxy or https_proxy:
-        # httpx 0.28+ uses 'proxy' instead of 'proxies'
-        proxy = https_proxy or http_proxy
-        return _OpenAI(api_key=api_key, http_client=httpx.Client(proxy=proxy, timeout=30))
-    return _OpenAI(api_key=api_key)
+    return _OpenAI(api_key=api_key, http_client=httpx.Client(timeout=30))
 
 _OPENAI_CLIENT = _make_openai_client()
 _OPENAI_EMB_MODEL = os.getenv("EMB_MODEL", "text-embedding-3-small")
 
 # ---------------- 임베딩 함수 (충돌 해결 버전) ----------------
-class OpenAIEmbedder:
-    """chromadb용 임베더: .name 속성과 __call__ 제공"""
+try:
+    from chromadb import EmbeddingFunction as _EmbeddingFunctionBase
+except ImportError:
+    _EmbeddingFunctionBase = object
+
+class OpenAIEmbedder(_EmbeddingFunctionBase):
+    """chromadb용 임베더: EmbeddingFunction 프로토콜 구현"""
     def __init__(self, client, model_name: str):
         self.client = client
         self.model_name = model_name
         self._name = f"openai:{model_name}"
-        
-    @property
-    def name(self):
+
+    def name(self) -> str:
         return self._name
 
     def __call__(self, input: list[str]) -> list[list[float]]:
-        """Chroma 0.4.16+는 input 키워드 인자를 받음"""
         resp = self.client.embeddings.create(model=self.model_name, input=input)
         return [d.embedding for d in resp.data]
 

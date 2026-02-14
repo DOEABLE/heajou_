@@ -4,6 +4,7 @@ import pandas as pd
 import os
 import re
 from rag import rag_answer, build_index, _read_org_info, match_corporate_card, format_question_with_enter
+from html_to_csv import extract_expense_data_from_html
 
 def yellow_highliter(cardlog, doclog):
     #cardlog 데이터프레임에 "승인번호" 행과 doclog 데이터프레임에 "승인번호"가 일치하는 경우
@@ -124,16 +125,16 @@ def make_highlight_func(red_inx_arr, yellow_idx_arr, blue_idx_arr):
     def highlight_over_limit(row):
         if row.승인번호 in yellow_idx_arr:
             print("yellow>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-            return ["background-color: #ffff99"] * len(row)
+            return ["background-color: #f6bd5a; color: #ffffff"] * len(row)
 
         if row.기본적요 in blue_idx_arr:
-            return ["background-color: #9dbefa"] * len(row)
+            return ["background-color: #1e73be; color: #ffffff"] * len(row)
 
         if row.name in red_inx_arr:
-            return ["background-color: #ffcccc"] * len(row)
-        
+            return ["background-color: #fa4747; color: #ffffff"] * len(row)
+
         elif row["합계"] > row["한도금액"]:
-            return ["background-color: #ffeeba"] * len(row)
+            return ["background-color: #7d6608; color: #ffffff"] * len(row)
         
         else:
             return [""] * len(row)
@@ -209,7 +210,7 @@ with tab2:
                 def highlight_matched_approval(row):
                     #if row.name in st.session_state.matched_indices:
                     if str(row['승인번호']) in st.session_state.get("matched_ids_set", set()):
-                        return ['background-color: #cccccc'] * len(row)
+                        return ['background-color: #5d6d7e; color: #ffffff'] * len(row)
                     return [''] * len(row)
                 
                 # 데이터 표시
@@ -236,14 +237,19 @@ with tab2:
     with right_col:
         st.markdown("#### 📝 지출결의")
         expense_file = st.file_uploader(
-            "지출결의 CSV 파일 업로드",
-            type=['csv'],
+            "지출결의 파일 업로드 (HTML 또는 CSV)",
+            type=['html', 'csv'],
             key="expense"
         )
-        
+
         if expense_file:
             try:
-                expense_df = pd.read_csv(expense_file, encoding='utf-8-sig')
+                if expense_file.name.lower().endswith('.html'):
+                    html_content = expense_file.read().decode('utf-8')
+                    expense_df = extract_expense_data_from_html(html_content)
+                    st.info(f"HTML → CSV 변환 완료: {len(expense_df)}건")
+                else:
+                    expense_df = pd.read_csv(expense_file, encoding='utf-8-sig')
                 
                 # limits.csv 로드
                 limits_path = os.path.join(os.path.dirname(__file__), "..", "data", "vectorstore", "limits.csv")
@@ -278,7 +284,7 @@ with tab2:
                             
                             def highlight_matched_approval(row):
                                 if str(row['승인번호']) in st.session_state.get("matched_ids_set", set()):
-                                    return ['background-color: #cccccc'] * len(row)
+                                    return ['background-color: #5d6d7e; color: #ffffff'] * len(row)
                                 return [''] * len(row)
                             
                             left_placeholder.dataframe(
