@@ -34,3 +34,5 @@ build/
 dist/
 *.egg-info/
 requirements-py313.txt
+*.xlsx
+*.csv
