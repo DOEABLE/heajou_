@@ -59,8 +59,9 @@ def _embedding_function():
         )
 
 # ---------------- 경로 설정 ----------------
-DBDIR  = "data/vectorstore/chroma"
-FAQDIR = "data/vectorstore"
+_BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
+DBDIR  = os.path.join(_BASE_DIR, "data", "vectorstore", "chroma")
+FAQDIR = os.path.join(_BASE_DIR, "data", "vectorstore")
 
 HIDDEN_DIR     = os.path.join(FAQDIR, "hidden")
 CORRECTION_DIR = os.path.join(FAQDIR, "correction")
@@ -115,22 +116,38 @@ def _read_qa_md(path: str) -> list[tuple[str, str]]:
             pairs.append((q, a))
     return pairs
 
+# ---------------- 텍스트 청킹 ----------------
+def _chunk_text(text: str, max_chars: int = 2000, overlap: int = 200) -> list[str]:
+    """긴 텍스트를 겹치는 청크로 분할"""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + max_chars
+        chunk = text[start:end]
+        if chunk.strip():
+            chunks.append(chunk)
+        start += max_chars - overlap
+    return chunks
+
 # ---------------- 인덱스 빌드 ----------------
 def build_index() -> None:
     os.makedirs(DBDIR, exist_ok=True)
     cli = _chroma_client()
     col = cli.get_or_create_collection("faqs", embedding_function=_embedding_function())
 
-    # 1) PDF/MD/TXT 문서 색인
+    # 1) PDF/MD/TXT 문서 색인 (청크 단위)
     files = glob.glob(f"{FAQDIR}/*.md") + glob.glob(f"{FAQDIR}/*.txt") + glob.glob(f"{FAQDIR}/*.pdf")
     ids, docs, metas = [], [], []
     for f in files:
         txt = _read(f)
         if not txt.strip():
             continue
-        ids.append(os.path.basename(f))
-        docs.append(txt[:10000])
-        metas.append({"path": f})
+        chunks = _chunk_text(txt)
+        basename = os.path.basename(f)
+        for i, chunk in enumerate(chunks):
+            ids.append(f"{basename}::chunk{i}")
+            docs.append(chunk)
+            metas.append({"path": f, "chunk": i})
     if ids:
         col.upsert(ids=ids, documents=docs, metadatas=metas)
 
@@ -146,7 +163,10 @@ def build_index() -> None:
     if q_ids:
         col.upsert(ids=q_ids, documents=q_docs, metadatas=q_metas)
 
-    cli.persist()
+    try:
+        cli.persist()
+    except AttributeError:
+        pass  # 최신 ChromaDB는 자동 persist
 
 # ---------------- 마감일 규칙 & 영업일 보정 ----------------
 ADJUST_TO_BUSINESS_DAY = os.getenv("RAG_DEADLINE_BUSINESS_DAY", "1") in ("1", "true", "True")
@@ -281,14 +301,41 @@ def rag_answer(question: str, k: int = 3, show_sources: bool = False) -> tuple[s
     # ──────────────────────────────────────────────
     # 4) 질문에서 이름·직급 추출 → 조직도 조회
     # ──────────────────────────────────────────────
+    # 이름+직급 패턴 먼저 시도
     match_name_rank = re.search(
         r"([가-힣A-Za-z]+)\s*(팀장|부장|임원|차장|과장|대리|사원)", question
     )
     user_name, user_rank = match_name_rank.groups() if match_name_rank else (None, None)
 
+    # 직급 없이 이름만 있는 경우: 조직도 팀장/팀원 목록에서 검색
     org_path = os.path.join(FAQDIR, "org_info.csv")
+    not_leader_msg = ""
+    if not user_name:
+        try:
+            org_df = pd.read_csv(org_path, encoding="utf-8-sig")
+            # 팀장 목록에서 검색
+            for leader in org_df["팀장"].astype(str).str.strip():
+                if leader in question:
+                    user_name = leader
+                    user_rank = "팀장"
+                    break
+            # 팀장에 없으면 팀원 목록에서 검색
+            if not user_name:
+                for _, row in org_df.iterrows():
+                    members = str(row.get("팀원", "")).strip()
+                    for m in members.split(","):
+                        m = m.strip()
+                        if m and m in question:
+                            user_name = m
+                            not_leader_msg = f"\n\n> {m} 님은 팀장이 아닌 것으로 보입니다. 김도희 사원에게 문의해주세요."
+                            break
+                    if user_name:
+                        break
+        except Exception:
+            pass
+
     member_count, team_name = (
-        _count_members_from_org(org_path, user_name) if user_name else (None, None)
+        _count_members_from_org(org_path, user_name) if user_name and not not_leader_msg else (None, None)
     )
 
     # ──────────────────────────────────────────────
@@ -296,18 +343,38 @@ def rag_answer(question: str, k: int = 3, show_sources: bool = False) -> tuple[s
     # ──────────────────────────────────────────────
     team_info_text, auto_calc_text = "", ""
     if member_count and team_name:
-        team_info_text = f"{team_name} ({user_rank} {user_name})의 팀원 수는 {member_count}명입니다."
+        team_info_text = f"{team_name} ({user_rank or '팀장'} {user_name})의 팀원 수는 {member_count}명입니다."
 
-    if "업무추진비" in question and user_rank in designated_amounts:
-        base = designated_amounts[user_rank]
-        if member_count:
+    # 팀 이름 부분 검색: 질문에 팀 키워드가 있으면 관련 팀 목록 제공
+    team_keyword_match = re.search(r"([가-힣A-Za-z0-9\-]+)팀", question)
+    if team_keyword_match and os.path.exists(org_path):
+        try:
+            org_df = pd.read_csv(org_path, encoding="utf-8-sig")
+            keyword = team_keyword_match.group(1)
+            matched_teams = org_df[org_df["팀명"].astype(str).str.contains(keyword, na=False)]
+            if not matched_teams.empty:
+                team_lines = []
+                for _, row in matched_teams.iterrows():
+                    team_lines.append(f"- {row['팀명']} (팀장: {row['팀장']}, 팀원수: {row['팀원수']}명)")
+                team_info_text += f"\n\n'{keyword}'이(가) 포함된 팀 목록:\n" + "\n".join(team_lines)
+                if len(matched_teams) > 1:
+                    team_info_text += f"\n\n'{keyword}팀'에 해당하는 팀이 여러 개입니다. 위 목록을 보여주고 정확한 팀 이름을 알려달라고 안내하세요."
+        except Exception:
+            pass
+
+    if "업무추진비" in question:
+        base = designated_amounts.get(user_rank) if user_rank else None
+        # 팀장인데 designated_amounts에 없으면 기본 단가 20,000원
+        if base is None and member_count:
+            base = 20000
+        if base and member_count:
             total = base * member_count
             auto_calc_text = (
-                f"💰 자동 계산: {user_rank} {user_name} - "
-                f"팀원 {member_count}명 × {base:,}원 = {total:,}원"
+                f"자동 계산: {user_rank or '팀장'} {user_name} - "
+                f"팀원 {member_count}명 x {base:,}원 = {total:,}원"
             )
-        else:
-            auto_calc_text = f"💰 자동 계산: {user_rank} 기준 1인당 {base:,}원"
+        elif base:
+            auto_calc_text = f"자동 계산: {user_rank or '팀장'} 기준 1인당 {base:,}원"
 
     # ──────────────────────────────────────────────
     # 6) 시스템 프롬프트 조립
@@ -343,6 +410,10 @@ def rag_answer(question: str, k: int = 3, show_sources: bool = False) -> tuple[s
     else:
         # 키가 없거나 컨텍스트 부족 시 스니펫 반환
         answer = f"(OPENAI_API_KEY 없음 또는 컨텍스트 부족)\n\n상위 스니펫:\n{ctx[:1200]}"
+
+    # 팀장이 아닌 경우 안내 문구 추가
+    if not_leader_msg:
+        answer += not_leader_msg
 
     # ──────────────────────────────────────────────
     # 8) 출처 표시 (선택)
@@ -439,12 +510,13 @@ def format_question_with_enter(question: str) -> str:
 def _read_org_info() -> Optional[pd.DataFrame]:
     org_path = os.path.join(FAQDIR, "org_info.csv")
     if not os.path.exists(org_path):
-        print("⚠️ 조직도 파일(org_info.csv)이 없습니다.")
+        print("[WARN] 조직도 파일(org_info.csv)이 없습니다.")
         return None
     try:
-        return pd.read_csv(org_path, encoding="utf-8")
+        from update_org_counts import update_counts
+        return update_counts(org_path)
     except Exception as e:
-        print(f"❌ 조직도 CSV 파싱 오류: {e}")
+        print(f"[ERROR] 조직도 CSV 파싱 오류: {e}")
         return None
 
 def _count_members_from_org(org_path: str, leader_name: str) -> tuple[int | None, str | None]:

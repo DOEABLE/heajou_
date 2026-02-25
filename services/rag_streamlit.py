@@ -47,21 +47,24 @@ def blue_highliter(doclog):
 
 def team_leader_finder(team_leader_name):
     csv_path = os.path.join(os.path.dirname(__file__), "..", "data", "vectorstore", "org_info.csv")
-    
-    # CSV 파일 읽기
-    df = pd.read_csv(csv_path, encoding='utf-8-sig')
 
-    # 입력한 이름과 일치하는 팀장 검색
+    # CSV 파일 읽기 (팀원수 자동 재계산)
+    from update_org_counts import update_counts
+    df = update_counts(csv_path)
+
+    # 입력한 이름과 일치하는 팀장 검색 (공백 제거 후 비교)
+    team_leader_name = str(team_leader_name).strip()
+    df["팀장"] = df["팀장"].astype(str).str.strip()
     matched = df[df["팀장"] == team_leader_name]
 
     if matched.empty:
-        print(f"⚠️ '{team_leader_name}' 이름의 팀장을 찾을 수 없습니다.")
+        print(f"[WARN] '{team_leader_name}' 이름의 팀장을 찾을 수 없습니다.")
         return 0
 
     # 팀원수 열 값 추출
     team_member_count = int(matched["팀원수"].iloc[0])
 
-    print(f"✅ {team_leader_name} 팀장님의 팀원 수: {team_member_count}명")
+    print(f"[INFO] {team_leader_name} 팀장님의 팀원 수: {team_member_count}명")
     return team_member_count
 
 def test_all_data(pd_data):
@@ -77,21 +80,22 @@ def test_all_data(pd_data):
     # '합계' 열만 추출
     if "합계" not in filtered.columns:
         raise ValueError("'합계'라는 열이 없습니다.")
-    
+
     hapgye_col = (
         filtered["합계"]
-        .astype(str)  # 혹시 숫자 외 값이 있을 수도 있으므로 문자열화
-        .str.replace(",", "", regex=False)  # 쉼표 제거
-        .astype(float)  # 숫자 변환
+        .astype(str)
+        .str.replace(",", "", regex=False)
+        .astype(float)
     )
 
     if "사용자" not in df.columns:
         raise ValueError("'사용자' 열이 없습니다.")
     else:
-        user_name_col = df["사용자"].iloc[0]  # 첫 번째 행 값
+        user_name_col = str(df["사용자"].iloc[0]).strip()
 
+    print(f"[DEBUG] 사용자 값: '{user_name_col}'")
     all_team_num = team_leader_finder(user_name_col)
-    
+
     # 합계 계산
     total_sum = hapgye_col.sum()
 
@@ -107,15 +111,21 @@ def test_csv_data_valid(pd_data):
     yellow_index = []
     
     for idx, df_row in df.iterrows():
-        if df_row["한도금액"] == "":
+        if df_row["한도금액"] == "" or pd.isna(df_row["한도금액"]):
             pass
         else:
-            if df_row["한도금액"] >= df_row["합계"]:
+            try:
+                limit_val = int(str(df_row["한도금액"]).replace(",", ""))
+                total_val = int(str(df_row["합계"]).replace(",", ""))
+                if limit_val < 0:
+                    pass  # 음수 한도(-1, -2)는 체크 제외
+                elif limit_val >= total_val:
+                    pass
+                else:
+                    print(f"[INFO] 한도초과: idx={idx}, 합계={total_val}, 한도={limit_val}")
+                    yellow_index.append(idx)
+            except (ValueError, TypeError):
                 pass
-            else:
-                df.style.apply(["background-color: #ffcccc"]*len(df_row))
-                print(df_row)
-                yellow_index.append(idx)
 
     return yellow_index
 
@@ -142,6 +152,19 @@ def make_highlight_func(red_inx_arr, yellow_idx_arr, blue_idx_arr):
 
 
 st.set_page_config(page_title="RAG FAQ 시스템", layout="wide")
+
+st.markdown("""
+<style>
+div[data-testid="stChatInput"] textarea {
+    min-height: 80px !important;
+}
+/* 전송 버튼 둥글게 */
+div[data-testid="stChatInput"] button {
+    border-radius: 50% !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.title("📚 \"알려줘\"")
 
 # 탭 구성
@@ -152,26 +175,21 @@ with tab1:
     if "history" not in st.session_state:
         st.session_state.history = []
     
-    # 엔터키로 제출 가능한 form
-    with st.form(key='question_form'):
-        question = st.text_area("질문을 입력하세요 (Enter로 실행):", height=100)
-        col1, col2 = st.columns([1, 5])
-        with col1:
-            submit = st.form_submit_button("🔍 검색", use_container_width=True)
-    
-    if submit and question:
+    question = st.chat_input("질문을 입력하세요 (Enter: 검색 / Shift+Enter: 줄바꿈)")
+
+    if question:
         question = format_question_with_enter(question)
-        answer = rag_answer(question)
+        answer, _ = rag_answer(question)
         st.session_state.history.append((question, answer))
         st.markdown("### 🤖 답변")
-        st.write(answer)
+        st.markdown(f"<div style='font-size:18px; line-height:1.8'>{answer}</div>", unsafe_allow_html=True)
         st.divider()
 
     if st.session_state.history:
         st.markdown("### 📜 이전 대화 기록")
         for i, (q, a) in enumerate(st.session_state.history, 1):
             with st.expander(f"Q{i}: {q}", expanded=False):
-                st.markdown(f"**A:** {a}")
+                st.markdown(f"<div style='font-size:18px; line-height:1.8'>{a}</div>", unsafe_allow_html=True)
 
 # Tab 2: 법인카드 매칭
 with tab2:
@@ -252,7 +270,7 @@ with tab2:
                     expense_df = pd.read_csv(expense_file, encoding='utf-8-sig')
                 
                 # limits.csv 로드
-                limits_path = os.path.join(os.path.dirname(__file__), "..", "data", "vectorstore", "limits.csv")
+                limits_path = os.path.join(os.path.dirname(__file__), "..", "data", "vectorstore", "correction", "limits.csv")
                 if os.path.exists(limits_path):
                     limits_df = pd.read_csv(limits_path, encoding='utf-8-sig')
                     #st.success(f"✅ limits.csv 로드 완료 ({len(limits_df)}개 항목)")
@@ -296,6 +314,44 @@ with tab2:
                             st.session_state.expense_df = result_df
                             st.session_state.matched_indices = matched_approval_indices
 
+                            # --- 🔢 한도금액 매칭 (하이라이트 판정 전에 실행) ---
+                            try:
+                                if '기본적요' in st.session_state.expense_df.columns and not limits_df.empty:
+                                    st.session_state.expense_df['한도금액'] = ""
+
+                                    for idx, row in st.session_state.expense_df.iterrows():
+                                        desc = str(row.get('기본적요') or '').strip()
+                                        if len(desc) < 4:
+                                            continue
+                                        code4 = desc[:4]
+                                        matched_rows = limits_df[limits_df['적요'].apply(lambda x: str(int(float(x))) if pd.notna(x) else '').str.strip() == code4]
+
+                                        if not matched_rows.empty:
+                                            raw = matched_rows.iloc[0].get('금액')
+                                            amount = str(raw).replace(",", "").strip()
+                                            if re.match(r"^-?\d+(\.\d+)?$", amount):
+                                                amount_int = int(float(amount))
+                                                if amount_int == -1:
+                                                    st.session_state.expense_df.at[idx, '한도금액'] = "한도없음"
+                                                    print(f"[INFO] [{code4}] 한도없음 설정 (기본적요: {desc})")
+                                                elif amount_int == -2:
+                                                    st.session_state.expense_df.at[idx, '한도금액'] = "실비정산"
+                                                    print(f"[INFO] [{code4}] 실비정산 설정 (기본적요: {desc})")
+                                                elif amount_int > 0:
+                                                    amount_fmt = f"{amount_int:,}"
+                                                    st.session_state.expense_df.at[idx, '한도금액'] = amount_fmt
+                                                    print(f"[INFO] [{code4}] 한도금액 {amount_fmt}원 설정 완료 (기본적요: {desc})")
+                                                else:
+                                                    st.session_state.expense_df.at[idx, '한도금액'] = str(amount_int)
+                                            else:
+                                                print(f"[WARN] [{code4}] 금액이 숫자가 아님: {amount}")
+                                        else:
+                                            print(f"[WARN] [{code4}] limits.csv에 해당 코드 없음 (기본적요: {desc})")
+                                else:
+                                    print("[WARN] limits_df 비어있거나 기본적요 컬럼 없음")
+                            except Exception as e:
+                                print(f"[ERROR] 한도금액 매칭 오류: {e}")
+
                             if test_all_data(st.session_state.expense_df) == 1:
                                 st.success(f"✅ 업무추진비 체크 완료, 사용 금액이 제한 금액 이내")
                             else:
@@ -310,39 +366,6 @@ with tab2:
 
                             df_style = df_coler.style.apply(highlight_func, axis=1)
                             st.dataframe(df_style)
-
-                                                        
-                        # --- 🔢 한도금액 매칭 추가 (기본적요 첫 4자리 숫자 기준) ---
-                        try:
-                            if '기본적요' in st.session_state.expense_df.columns and not limits_df.empty:
-                                st.session_state.expense_df['한도금액'] = ""
-
-                                for idx, row in st.session_state.expense_df.iterrows():
-                                    # 매 줄마다 승인번호 기준으로 금액 체크
-                                    
-
-                                    desc = str(row.get('기본적요') or '').strip()
-                                    if len(desc) < 4:
-                                        continue
-                                    code4 = desc[:4]  # 기본적요 앞 4자리 숫자
-                                    # limits.csv의 적요 열 값과 비교
-                                    matched_rows = limits_df[limits_df['적요'].astype(str).str.strip() == code4]
-
-                                    if not matched_rows.empty:
-                                        amount = str(matched_rows.iloc[0].get('금액') or '').replace(",", "").strip()
-                                        # 숫자인 경우만 천단위 표시
-                                        if re.match(r"^-?\d+$", amount):
-                                            amount_fmt = f"{int(amount):,}"
-                                            st.session_state.expense_df.at[idx, '한도금액'] = amount_fmt
-                                            print(f"✅ [{code4}] 한도금액 {amount_fmt}원 설정 완료 (기본적요: {desc})")
-                                        else:
-                                            print(f"⚠️ [{code4}] 금액이 숫자가 아님: {amount}")
-                                    else:
-                                        print(f"⚠️ [{code4}] limits.csv에 해당 코드 없음 (기본적요: {desc})")
-                            else:
-                                print("⚠️ limits_df 비어있거나 기본적요 컬럼 없음")
-                        except Exception as e:
-                            print(f"❌ 한도금액 매칭 오류: {e}")
 
 
                         # 매칭 통계 표시
@@ -377,7 +400,23 @@ with tab2:
 # Tab 3: 관리자
 with tab3:
     st.markdown("### 🛠 관리자 기능")
-    
+
+    # 📋 기능명세서 다운로드
+    spec_path = os.path.join(os.path.dirname(__file__), "..", "data", "vectorstore", "docs", "feature_spec.html")
+    if os.path.exists(spec_path):
+        with open(spec_path, "r", encoding="utf-8") as f:
+            spec_html = f.read()
+        st.download_button(
+            label="📋 기능명세서 다운로드 (HTML)",
+            data=spec_html,
+            file_name="feature_spec.html",
+            mime="text/html",
+        )
+    else:
+        st.warning("⚠️ 기능명세서 파일이 없습니다.")
+
+    st.divider()
+
     col1, col2, col3 = st.columns(3)
     
     with col1:
@@ -413,7 +452,7 @@ with tab3:
     
     # limits.csv 미리보기
     st.markdown("### 💰 한도 설정 (limits.csv)")
-    limits_path = os.path.join(os.path.dirname(__file__), "..", "data", "vectorstore", "limits.csv")
+    limits_path = os.path.join(os.path.dirname(__file__), "..", "data", "vectorstore", "correction", "limits.csv")
     if os.path.exists(limits_path):
         limits_preview = pd.read_csv(limits_path, encoding='utf-8-sig')
         st.dataframe(limits_preview, use_container_width=True, height=200)
