@@ -59,7 +59,7 @@ def team_leader_finder(team_leader_name):
 
     if matched.empty:
         print(f"[WARN] '{team_leader_name}' 이름의 팀장을 찾을 수 없습니다.")
-        return 0
+        return None
 
     # 팀원수 열 값 추출
     team_member_count = int(matched["팀원수"].iloc[0])
@@ -67,17 +67,35 @@ def team_leader_finder(team_leader_name):
     print(f"[INFO] {team_leader_name} 팀장님의 팀원 수: {team_member_count}명")
     return team_member_count
 
+EXEC_ONLY_CODES = {"8529", "8365", "8049"}
+
 def test_all_data(pd_data):
     df = pd_data
 
-    # 조건 필터링
+    if "사용자" not in df.columns:
+        raise ValueError("'사용자' 열이 없습니다.")
+
+    user_name_col = str(df["사용자"].iloc[0]).strip()
+    print(f"[DEBUG] 사용자 값: '{user_name_col}'")
+    all_team_num = team_leader_finder(user_name_col)
+    is_leader = all_team_num is not None
+
+    # 팀장이 아닌 경우: 보직자 전용 항목(8529/8365/8049) 포함 여부 체크
+    if not is_leader:
+        has_exec_only = df["기본적요"].astype(str).apply(
+            lambda x: x[:4] in EXEC_ONLY_CODES
+        ).any()
+        if has_exec_only:
+            return 2  # 보직자 전용 항목 포함 경고
+        return 3  # 팀장 아님 + 보직자 항목 없음 → 알림 없음
+
+    # 업무추진비 조건 필터링
     valid_conditions = [
         "8029 / (판) 법카 - 업무추진비(기타)",
         "8031 / (판) 법카 - 업무추진비(식대)"
     ]
     filtered = df[df["기본적요"].isin(valid_conditions)]
 
-    # '합계' 열만 추출
     if "합계" not in filtered.columns:
         raise ValueError("'합계'라는 열이 없습니다.")
 
@@ -88,18 +106,10 @@ def test_all_data(pd_data):
         .astype(float)
     )
 
-    if "사용자" not in df.columns:
-        raise ValueError("'사용자' 열이 없습니다.")
-    else:
-        user_name_col = str(df["사용자"].iloc[0]).strip()
-
-    print(f"[DEBUG] 사용자 값: '{user_name_col}'")
-    all_team_num = team_leader_finder(user_name_col)
-
-    # 합계 계산
     total_sum = hapgye_col.sum()
+    team_num = all_team_num if all_team_num else 0
 
-    if (all_team_num * 20000) >= total_sum:
+    if (team_num * 20000) >= total_sum:
         return 1
     else:
         return 0
@@ -143,41 +153,73 @@ def make_highlight_func(red_inx_arr, yellow_idx_arr, blue_idx_arr):
         if row.name in red_inx_arr:
             return ["background-color: #fa4747; color: #ffffff"] * len(row)
 
-        elif row["합계"] > row["한도금액"]:
-            return ["background-color: #7d6608; color: #ffffff"] * len(row)
-        
         else:
             return [""] * len(row)
     return highlight_over_limit
 
 
-st.set_page_config(page_title="RAG FAQ 시스템", layout="wide")
+st.set_page_config(page_title="FAQ & 법인카드 감사시스템", layout="wide")
 
 st.markdown("""
 <style>
-div[data-testid="stChatInput"] textarea {
-    min-height: 80px !important;
+/* 메인 탭 버튼만 스타일 적용 (첫 번째 stHorizontalBlock) */
+div[data-testid="stHorizontalBlock"]:first-of-type button[data-testid="stBaseButton-secondary"],
+div[data-testid="stHorizontalBlock"]:first-of-type button[data-testid="stBaseButton-primary"] {
+    height: 140px !important;
+    font-size: 40px !important;
+    font-weight: 900 !important;
+    border-radius: 12px !important;
+    transition: all 0.2s !important;
 }
-/* 전송 버튼 둥글게 */
-div[data-testid="stChatInput"] button {
-    border-radius: 50% !important;
+div[data-testid="stHorizontalBlock"]:first-of-type button[data-testid="stBaseButton-secondary"] {
+    border: 2px solid #ddd !important;
+}
+div[data-testid="stHorizontalBlock"]:first-of-type button[data-testid="stBaseButton-secondary"]:hover {
+    border-color: #2c5fc7 !important;
+    color: #2c5fc7 !important;
 }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📚 \"알려줘\"")
+st.markdown("<h1 style='text-align: center; font-size: 48px; margin-bottom: 40px;'>🌐 재무기획실 산하 경영혁신 Think Tank</h1>", unsafe_allow_html=True)
 
-# 탭 구성
-tab1, tab2, tab3 = st.tabs(["💬 일반 사용자", "💳 법인카드 매칭", "🛠 관리자"])
+# 탭 상태 관리
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = "연구소"
 
-# Tab 1: 일반 사용자
-with tab1:
+# 탭 버튼
+tabs_config = [
+    ("연구소", "🐦 경영지원연구소"),
+    ("매칭", "💳 법인카드 매칭"),
+    ("관리자", "🛠 관리자"),
+]
+with st.container():
+    st.markdown('<div class="main-tabs">', unsafe_allow_html=True)
+    btn_cols = st.columns(len(tabs_config))
+    for i, (key, label) in enumerate(tabs_config):
+        with btn_cols[i]:
+            is_active = st.session_state.active_tab == key
+            btn_type = "primary" if is_active else "secondary"
+            if st.button(label, use_container_width=True, key=f"tab_btn_{i}", type=btn_type):
+                st.session_state.active_tab = key
+                st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+st.divider()
+
+# Tab 1: 경영지원연구소
+if st.session_state.active_tab == "연구소":
     if "history" not in st.session_state:
         st.session_state.history = []
-    
-    question = st.chat_input("질문을 입력하세요 (Enter: 검색 / Shift+Enter: 줄바꿈)")
 
-    if question:
+    st.markdown("<p style='font-size: 20px; font-weight: 800;'> 🐦 슈어에 대한 모든 것 🐦 (Ctrl+Enter: 검색)</p>", unsafe_allow_html=True)
+    with st.form(key='question_form'):
+        question = st.text_area("", height=100, label_visibility="collapsed", placeholder="ex) 경조사 청구에 대해 알려줘.")
+        col1, col2 = st.columns([1, 5])
+        with col1:
+            submit = st.form_submit_button("🔍 검색", use_container_width=True)
+
+    if submit and question:
         question = format_question_with_enter(question)
         answer, _ = rag_answer(question)
         st.session_state.history.append((question, answer))
@@ -192,7 +234,7 @@ with tab1:
                 st.markdown(f"<div style='font-size:18px; line-height:1.8'>{a}</div>", unsafe_allow_html=True)
 
 # Tab 2: 법인카드 매칭
-with tab2:
+elif st.session_state.active_tab == "매칭":
     st.markdown("### 💳 법인카드 승인내역 매칭")
     
     # 세션 상태 초기화
@@ -352,10 +394,14 @@ with tab2:
                             except Exception as e:
                                 print(f"[ERROR] 한도금액 매칭 오류: {e}")
 
-                            if test_all_data(st.session_state.expense_df) == 1:
-                                st.success(f"✅ 업무추진비 체크 완료, 사용 금액이 제한 금액 이내")
-                            else:
-                                st.success(f"❌ 업무추진비 정합성 오류, 제한 금액 초과")
+                            result = test_all_data(st.session_state.expense_df)
+                            if result == 1:
+                                st.success("✅ 업무추진비 체크 완료, 사용 금액이 제한 금액 이내")
+                            elif result == 2:
+                                st.error("⚠️ 보직자 이상만 올릴 수 있는 내역이 포함되어있습니다.")
+                            elif result == 0:
+                                st.error("❌ 업무추진비 정합성 오류, 제한 금액 초과")
+                            # result == 3: 팀장 아님 + 보직자 항목 없음 → 알림 없음
 
                             red_inx_arr = test_csv_data_valid(st.session_state.expense_df)
                             yellow_inx_arr = yellow_highliter(st.session_state.approval_df, st.session_state.expense_df)
@@ -398,7 +444,7 @@ with tab2:
                 st.error(f"파일 처리 오류: {str(e)}")
 
 # Tab 3: 관리자
-with tab3:
+elif st.session_state.active_tab == "관리자":
     st.markdown("### 🛠 관리자 기능")
 
     # 📋 기능명세서 다운로드
