@@ -541,13 +541,13 @@ elif st.session_state.active_tab == "피드백":
 elif st.session_state.active_tab == "관리자":
     st.markdown("### 🛠 관리자 기능")
 
-    # 📋 기능명세서 다운로드
-    spec_path = os.path.join(os.path.dirname(__file__), "..", "data", "vectorstore", "docs", "feature_spec.html")
+    # 📋 사용설명서 다운로드
+    spec_path = os.path.join(os.path.dirname(__file__), "..", "data", "docs", "feature_spec.html")
     if os.path.exists(spec_path):
         with open(spec_path, "r", encoding="utf-8") as f:
             spec_html = f.read()
         st.download_button(
-            label="📋 기능명세서 다운로드 (HTML)",
+            label="📋 사용설명서 다운로드 (HTML)",
             data=spec_html,
             file_name="feature_spec.html",
             mime="text/html",
