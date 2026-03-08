@@ -3,8 +3,36 @@ from datetime import datetime
 import pandas as pd
 import os
 import re
+from dotenv import load_dotenv
+import gspread
+from google.oauth2.service_account import Credentials
 from rag import rag_answer, build_index, _read_org_info, match_corporate_card, format_question_with_enter
 from html_to_csv import extract_expense_data_from_html
+
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+GOOGLE_CREDENTIALS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json")
+)
+FEEDBACK_IMAGE_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "feedback_images")
+os.makedirs(FEEDBACK_IMAGE_DIR, exist_ok=True)
+
+def get_gsheet():
+    scopes = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_PATH, scopes=scopes)
+    client = gspread.authorize(creds)
+    sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
+    return sheet
+
+def append_feedback(row: list):
+    try:
+        sheet = get_gsheet()
+        sheet.append_row(row)
+        return True
+    except Exception as e:
+        st.error(f"Google Sheets 전송 오류: {e}")
+        return False
 
 def yellow_highliter(cardlog, doclog):
     #cardlog 데이터프레임에 "승인번호" 행과 doclog 데이터프레임에 "승인번호"가 일치하는 경우
@@ -162,12 +190,21 @@ st.set_page_config(page_title="FAQ & 법인카드 감사시스템", layout="wide
 
 st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Black+Han+Sans&display=swap');
+.title-font {
+    font-family: 'Black Han Sans', sans-serif;
+    text-align: center;
+    font-size: 48px;
+    margin-bottom: 40px;
+    color: #FF6B00;
+}
 /* 메인 탭 버튼만 스타일 적용 (첫 번째 stHorizontalBlock) */
 div[data-testid="stHorizontalBlock"]:first-of-type button[data-testid="stBaseButton-secondary"],
 div[data-testid="stHorizontalBlock"]:first-of-type button[data-testid="stBaseButton-primary"] {
     height: 140px !important;
     font-size: 40px !important;
     font-weight: 900 !important;
+    font-family: 'Black Han Sans', sans-serif !important;
     border-radius: 12px !important;
     transition: all 0.2s !important;
 }
@@ -181,16 +218,26 @@ div[data-testid="stHorizontalBlock"]:first-of-type button[data-testid="stBaseBut
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<h1 style='text-align: center; font-size: 48px; margin-bottom: 40px;'>🌐 재무기획실 산하 경영혁신 Think Tank</h1>", unsafe_allow_html=True)
+_duck_path = os.path.join(os.path.dirname(__file__), "..", "data", "duck.png")
+_left_col, _title_col, _right_col = st.columns([1, 5, 1])
+with _left_col:
+    if os.path.exists(_duck_path):
+        st.image(_duck_path)
+with _title_col:
+    st.markdown("<h1 class='title-font'>🌐 얼마남지 않았어, 아무도 야근하지 않는 방법을 찾아야 해.⏱️</h1>", unsafe_allow_html=True)
+with _right_col:
+    if os.path.exists(_duck_path):
+        st.image(_duck_path)
 
 # 탭 상태 관리
 if "active_tab" not in st.session_state:
-    st.session_state.active_tab = "연구소"
+    st.session_state.active_tab = "매칭"
 
 # 탭 버튼
 tabs_config = [
     ("연구소", "🐦 경영지원연구소"),
     ("매칭", "💳 법인카드 매칭"),
+    ("피드백", "📝 피드백"),
     ("관리자", "🛠 관리자"),
 ]
 with st.container():
@@ -443,7 +490,54 @@ elif st.session_state.active_tab == "매칭":
             except Exception as e:
                 st.error(f"파일 처리 오류: {str(e)}")
 
-# Tab 3: 관리자
+# Tab 3: 피드백
+elif st.session_state.active_tab == "피드백":
+    st.markdown("### 📝 피드백 제출")
+    st.markdown("불편하신 점이나 개선 요청사항을 남겨주세요. 개발팀이 검토 후 반영하겠습니다.")
+
+    with st.form(key="feedback_form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            fb_dept = st.text_input("부서 *", placeholder="예) 재무기획실")
+        with col2:
+            fb_feature = st.selectbox("사용 기능 *", ["경영지원연구소", "법인카드 매칭", "기타"])
+
+        fb_issue_type = st.selectbox(
+            "문제 유형 *",
+            ["오류 발생", "사용 불편", "속도 느림", "기능 요청", "문의"]
+        )
+        fb_content = st.text_area("의견 및 문제 설명 *", height=150, placeholder="구체적으로 작성해주실수록 빠른 처리가 가능합니다.")
+        #fb_image = st.file_uploader("화면 첨부 (선택)", type=["png", "jpg", "jpeg", "gif", "webp"])
+
+        submitted = st.form_submit_button("📨 제출", use_container_width=True, type="primary")
+
+    if submitted:
+        if not fb_dept.strip() or not fb_content.strip():
+            st.error("부서와 의견 및 문제 설명은 필수 항목입니다.")
+        else:
+            # 이미지 저장
+            image_path = ""
+            if fb_image:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                save_name = f"{ts}_{fb_image.name}"
+                save_path = os.path.join(FEEDBACK_IMAGE_DIR, save_name)
+                with open(save_path, "wb") as f:
+                    f.write(fb_image.read())
+                image_path = save_path
+
+            row = [
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                fb_dept.strip(),
+                fb_feature,
+                fb_content.strip(),
+                fb_issue_type,
+                image_path,
+                "New"
+            ]
+            if append_feedback(row):
+                st.success("✅ 피드백이 성공적으로 제출되었습니다. 감사합니다!")
+
+# Tab 4: 관리자
 elif st.session_state.active_tab == "관리자":
     st.markdown("### 🛠 관리자 기능")
 
@@ -497,7 +591,7 @@ elif st.session_state.active_tab == "관리자":
     st.divider()
     
     # limits.csv 미리보기
-    st.markdown("### 💰 한도 설정 (limits.csv)")
+    st.markdown("### 💰 한도 설정")
     limits_path = os.path.join(os.path.dirname(__file__), "..", "data", "vectorstore", "correction", "limits.csv")
     if os.path.exists(limits_path):
         limits_preview = pd.read_csv(limits_path, encoding='utf-8-sig')

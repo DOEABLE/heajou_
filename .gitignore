@@ -29,6 +29,10 @@ Thumbs.db
 .env
 .env.*
 
+# Google credentials
+*-credentials.json
+airy-gate-*.json
+
 # Build outputs
 build/
 dist/

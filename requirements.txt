@@ -16,3 +16,5 @@ beautifulsoup4
 lxml
 paddleocr
 opencv-python-headless
+gspread
+google-auth
