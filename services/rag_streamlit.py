@@ -53,11 +53,20 @@ def yellow_highliter(cardlog, doclog):
     #result_test = merged[merged['승인번호']=="30009885"]
     #print(result_test)
     yellow_data = []
-    for row in merged.itertuples(index=False):
-        if (row.합계.replace(",", "") != str(row.승인금액)):
-            print(row.승인번호)#30010024
-            yellow_data.append(row.승인번호)
-    
+    for _, row in merged.iterrows():
+        try:
+            total = str(row['합계']).replace(",", "").strip()
+            approved = str(row['승인금액']).replace(",", "").strip()
+            try:
+                approved = str(int(float(approved)))
+            except (ValueError, TypeError):
+                pass
+            if total != approved:
+                print(row['승인번호'])
+                yellow_data.append(row['승인번호'])
+        except Exception as e:
+            print(f"[WARN] yellow_highliter 행 처리 오류: {e}")
+
     return yellow_data
 
 
@@ -96,6 +105,42 @@ def team_leader_finder(team_leader_name):
     return team_member_count
 
 EXEC_ONLY_CODES = {"8529", "8365", "8049"}
+
+SPECIAL_TEAM_KEYWORDS = {"사업개발", "AX지원팀", "솔루션현장지원팀", "모빌리티지원팀"}
+
+def get_comm_limit_8363(user_name):
+    """8363(통신비) 한도 반환
+    - 특수팀(사업개발 포함/AX지원팀/솔루션현장지원팀/모빌리티지원팀) 팀장·팀원 → 70,000
+    - 일반팀 팀장 → 60,000
+    - 일반팀 팀원 → None (한도 미적용)
+    """
+    csv_path = os.path.join(os.path.dirname(__file__), "..", "data", "vectorstore", "org_info.csv")
+    try:
+        from update_org_counts import update_counts
+        df = update_counts(csv_path)
+    except Exception:
+        df = pd.read_csv(csv_path, encoding='utf-8-sig')
+
+    user_name = str(user_name).strip()
+    df["팀장"] = df["팀장"].astype(str).str.strip()
+
+    leader_match = df[df["팀장"] == user_name]
+    if not leader_match.empty:
+        team_name = str(leader_match.iloc[0]["팀명"])
+        if any(kw in team_name for kw in SPECIAL_TEAM_KEYWORDS):
+            return 70000
+        return 60000
+
+    for _, row in df.iterrows():
+        members = [m.strip() for m in str(row.get("팀원", "")).split(",")]
+        if user_name in members:
+            team_name = str(row["팀명"])
+            if any(kw in team_name for kw in SPECIAL_TEAM_KEYWORDS):
+                return 70000
+            return None
+
+    return None
+
 
 def test_all_data(pd_data):
     df = pd_data
@@ -153,8 +198,8 @@ def test_csv_data_valid(pd_data):
             pass
         else:
             try:
-                limit_val = int(str(df_row["한도금액"]).replace(",", ""))
-                total_val = int(str(df_row["합계"]).replace(",", ""))
+                limit_val = int(float(str(df_row["한도금액"]).replace(",", "")))
+                total_val = int(float(str(df_row["합계"]).replace(",", "")))
                 if limit_val < 0:
                     pass  # 음수 한도(-1, -2)는 체크 제외
                 elif limit_val >= total_val:
@@ -168,11 +213,13 @@ def test_csv_data_valid(pd_data):
     return yellow_index
 
 
-def make_highlight_func(red_inx_arr, yellow_idx_arr, blue_idx_arr):
+def make_highlight_func(red_inx_arr, yellow_idx_arr, blue_idx_arr, biseok_yellow_idx=None):
 
     def highlight_over_limit(row):
         if row.승인번호 in yellow_idx_arr:
-            print("yellow>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+            return ["background-color: #f6bd5a; color: #ffffff"] * len(row)
+
+        if biseok_yellow_idx and row.name in biseok_yellow_idx:
             return ["background-color: #f6bd5a; color: #ffffff"] * len(row)
 
         if row.기본적요 in blue_idx_arr:
@@ -310,13 +357,30 @@ elif st.session_state.active_tab == "매칭":
             try:
                 if approval_file.name.endswith('.csv'):
                     st.session_state.approval_df = pd.read_csv(approval_file, encoding='utf-8-sig')
+                elif approval_file.name.endswith('.xls'):
+                    import xlrd, io
+                    file_bytes = approval_file.read()
+                    wb = xlrd.open_workbook(file_contents=file_bytes, encoding_override='cp949')
+                    ws = wb.sheet_by_index(0)
+                    headers = ws.row_values(0)
+                    data = [ws.row_values(i) for i in range(1, ws.nrows)]
+                    _approval = pd.DataFrame(data, columns=headers)
+                    # xlrd float → 정수 변환 (예: 3100.0 → 3100)
+                    for col in _approval.columns:
+                        try:
+                            converted = _approval[col].apply(lambda x: int(x) if isinstance(x, float) and not pd.isna(x) and x == int(x) else x)
+                            _approval[col] = converted
+                        except Exception:
+                            pass
+                    _drop_cols = ['할인금액', '청구회차', '잔여회차', '수수료', '연체원금', '연체수수료']
+                    _approval.drop(columns=[c for c in _drop_cols if c in _approval.columns], inplace=True)
+                    st.session_state.approval_df = _approval
                 else:
                     st.session_state.approval_df = pd.read_excel(approval_file)
                 
                 # 매칭된 행 하이라이트 함수
                 def highlight_matched_approval(row):
-                    #if row.name in st.session_state.matched_indices:
-                    if str(row['승인번호']) in st.session_state.get("matched_ids_set", set()):
+                    if row.name in st.session_state.get("matched_indices", []) and str(row['승인번호']) in st.session_state.get("matched_expense_no_set", set()):
                         return ['background-color: #5d6d7e; color: #ffffff'] * len(row)
                     return [''] * len(row)
                 
@@ -380,9 +444,13 @@ elif st.session_state.active_tab == "매칭":
                             
                             # ✅ 추가: 승인번호 set 생성 (왼쪽 표 색칠 및 대조 기준)
                             matched_ids = set(
-                                st.session_state.approval_df.iloc[matched_approval_indices]['승인번호'].astype(str)
+                                st.session_state.approval_df.loc[matched_approval_indices]['승인번호'].astype(str)
+                            ) if matched_approval_indices else set()
+                            st.session_state.matched_ids_set = matched_ids
+                            # expense_df에 기록된 승인번호 set (승인번호 일치 추가 검증용)
+                            st.session_state.matched_expense_no_set = set(
+                                result_df['승인번호'].astype(str).replace('', pd.NA).dropna()
                             )
-                            st.session_state.matched_ids_set = matched_ids  # ← 이제 NameError 안 남
                             
                             #추가
                                                         # 매칭 결과 저장
@@ -390,7 +458,7 @@ elif st.session_state.active_tab == "매칭":
                             st.session_state.matched_indices = matched_approval_indices
                             
                             def highlight_matched_approval(row):
-                                if str(row['승인번호']) in st.session_state.get("matched_ids_set", set()):
+                                if row.name in st.session_state.get("matched_indices", []) and str(row['승인번호']) in st.session_state.get("matched_expense_no_set", set()):
                                     return ['background-color: #5d6d7e; color: #ffffff'] * len(row)
                                 return [''] * len(row)
                             
@@ -406,13 +474,27 @@ elif st.session_state.active_tab == "매칭":
                             # --- 🔢 한도금액 매칭 (하이라이트 판정 전에 실행) ---
                             try:
                                 if '기본적요' in st.session_state.expense_df.columns and not limits_df.empty:
-                                    st.session_state.expense_df['한도금액'] = ""
+                                    _limit_df = st.session_state.expense_df.copy()
+                                    _limit_df['한도금액'] = ""
 
-                                    for idx, row in st.session_state.expense_df.iterrows():
+                                    # 통신비(8363) 한도 판단을 위한 사용자명 추출
+                                    _comm_user = ""
+                                    if "사용자" in _limit_df.columns and len(_limit_df) > 0:
+                                        _comm_user = str(_limit_df["사용자"].iloc[0]).strip()
+
+                                    for idx, row in _limit_df.iterrows():
                                         desc = str(row.get('기본적요') or '').strip()
                                         if len(desc) < 4:
                                             continue
                                         code4 = desc[:4]
+
+                                        # 통신비(8363) 특수 처리: 팀/직급에 따라 한도 차등 적용
+                                        if code4 == "8363":
+                                            comm_limit = get_comm_limit_8363(_comm_user)
+                                            if comm_limit:
+                                                _limit_df.at[idx, '한도금액'] = f"{comm_limit:,}"
+                                            continue
+
                                         matched_rows = limits_df[limits_df['적요'].apply(lambda x: str(int(float(x))) if pd.notna(x) else '').str.strip() == code4]
 
                                         if not matched_rows.empty:
@@ -421,25 +503,19 @@ elif st.session_state.active_tab == "매칭":
                                             if re.match(r"^-?\d+(\.\d+)?$", amount):
                                                 amount_int = int(float(amount))
                                                 if amount_int == -1:
-                                                    st.session_state.expense_df.at[idx, '한도금액'] = "한도없음"
-                                                    print(f"[INFO] [{code4}] 한도없음 설정 (기본적요: {desc})")
+                                                    _limit_df.at[idx, '한도금액'] = "한도없음"
                                                 elif amount_int == -2:
-                                                    st.session_state.expense_df.at[idx, '한도금액'] = "실비정산"
-                                                    print(f"[INFO] [{code4}] 실비정산 설정 (기본적요: {desc})")
+                                                    _limit_df.at[idx, '한도금액'] = "실비정산"
                                                 elif amount_int > 0:
-                                                    amount_fmt = f"{amount_int:,}"
-                                                    st.session_state.expense_df.at[idx, '한도금액'] = amount_fmt
-                                                    print(f"[INFO] [{code4}] 한도금액 {amount_fmt}원 설정 완료 (기본적요: {desc})")
+                                                    _limit_df.at[idx, '한도금액'] = f"{amount_int:,}"
                                                 else:
-                                                    st.session_state.expense_df.at[idx, '한도금액'] = str(amount_int)
-                                            else:
-                                                print(f"[WARN] [{code4}] 금액이 숫자가 아님: {amount}")
-                                        else:
-                                            print(f"[WARN] [{code4}] limits.csv에 해당 코드 없음 (기본적요: {desc})")
+                                                    _limit_df.at[idx, '한도금액'] = str(amount_int)
+
+                                    st.session_state.expense_df = _limit_df
                                 else:
                                     print("[WARN] limits_df 비어있거나 기본적요 컬럼 없음")
                             except Exception as e:
-                                print(f"[ERROR] 한도금액 매칭 오류: {e}")
+                                st.error(f"[ERROR] 한도금액 매칭 오류: {e}")
 
                             result = test_all_data(st.session_state.expense_df)
                             if result == 1:
@@ -455,7 +531,13 @@ elif st.session_state.active_tab == "매칭":
                             blue_inx_arr = blue_highliter(st.session_state.expense_df)
 
                             df_coler = st.session_state.expense_df
-                            highlight_func = make_highlight_func(red_inx_arr, yellow_inx_arr, blue_inx_arr)
+                            # 법인카드(비과세) 행 인덱스 추출 → 노랑 처리
+                            biseok_yellow_idx = list(
+                                st.session_state.expense_df[
+                                    st.session_state.expense_df['증빙유형'].astype(str).str.strip() == '법인카드(비과세)'
+                                ].index
+                            )
+                            highlight_func = make_highlight_func(red_inx_arr, yellow_inx_arr, blue_inx_arr, biseok_yellow_idx)
 
                             df_style = df_coler.style.apply(highlight_func, axis=1)
                             st.dataframe(df_style)
