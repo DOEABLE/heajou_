@@ -597,15 +597,7 @@ elif st.session_state.active_tab == "피드백":
         if not fb_dept.strip() or not fb_content.strip():
             st.error("부서와 의견 및 문제 설명은 필수 항목입니다.")
         else:
-            # 이미지 저장
             image_path = ""
-            if fb_image:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                save_name = f"{ts}_{fb_image.name}"
-                save_path = os.path.join(FEEDBACK_IMAGE_DIR, save_name)
-                with open(save_path, "wb") as f:
-                    f.write(fb_image.read())
-                image_path = save_path
 
             row = [
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
