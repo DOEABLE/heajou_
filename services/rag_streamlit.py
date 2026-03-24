@@ -188,18 +188,63 @@ def test_all_data(pd_data):
         return 0
     
 # 적요의 한도금액이 사용 금액보다 작은지 확인하는 함수    
+def _parse_amount(v):
+    """합계/공급가액 문자열에서 숫자만 추출해 정수로 변환. 파싱 실패 시 None 반환."""
+    s = re.sub(r'[^\d.]', '', str(v).replace(",", ""))
+    if not s:
+        return None
+    try:
+        return int(float(s))
+    except (ValueError, TypeError):
+        return None
+
+
 def test_csv_data_valid(pd_data):
     df = pd_data
 
     yellow_index = []
-    
+
+    # 통신비 합산 한도 체크 대상 코드 (행별이 아닌 합산으로 비교)
+    # 8363: 일반팀 팀장만 60,000 적용 (특수팀은 70,000이므로 한도금액으로 구분)
+    # 6363: limits.csv 기준 60,000 (일반팀 통신비)
+    CUMULATIVE_COMM_CODES = {"8363", "6363"}
+
+    for code4 in CUMULATIVE_COMM_CODES:
+        target_rows = df[df["기본적요"].astype(str).str.strip().str[:4] == code4]
+        if target_rows.empty:
+            continue
+        limit_60_rows = target_rows[
+            target_rows["한도금액"].astype(str).str.replace(",", "", regex=False).str.strip() == "60000"
+        ]
+        if limit_60_rows.empty:
+            print(f"[DEBUG] {code4}: limit_60_rows 없음 (한도금액 설정 확인 필요)")
+            continue
+        amounts = []
+        for v_합계, v_공급 in zip(limit_60_rows["합계"], limit_60_rows.get("공급가액", [""] * len(limit_60_rows))):
+            amt = _parse_amount(v_합계)
+            if amt is None:
+                amt = _parse_amount(v_공급)  # 합계 파싱 실패 시 공급가액 대체
+            if amt is not None:
+                amounts.append(amt)
+        total_comm = sum(amounts)
+        print(f"[DEBUG] {code4} 합산: {amounts} → 합계={total_comm}, 한도=60000")
+        if total_comm > 60000:
+            print(f"[INFO] {code4} 통신비 합산 한도초과: 합계={total_comm}, 한도=60000")
+            yellow_index.extend(limit_60_rows.index.tolist())
+
     for idx, df_row in df.iterrows():
         if df_row["한도금액"] == "" or pd.isna(df_row["한도금액"]):
             pass
         else:
             try:
-                limit_val = int(float(str(df_row["한도금액"]).replace(",", "")))
-                total_val = int(float(str(df_row["합계"]).replace(",", "")))
+                desc = str(df_row.get("기본적요") or "")
+                # 합산 처리 대상 코드(8363/6363)의 60,000 한도 행은 위에서 처리했으므로 스킵
+                if desc.strip()[:4] in CUMULATIVE_COMM_CODES and str(df_row["한도금액"]).replace(",", "").strip() == "60000":
+                    continue
+                limit_val = _parse_amount(df_row["한도금액"])
+                total_val = _parse_amount(df_row["합계"])
+                if limit_val is None or total_val is None:
+                    continue
                 if limit_val < 0:
                     pass  # 음수 한도(-1, -2)는 체크 제외
                 elif limit_val >= total_val:
@@ -216,17 +261,19 @@ def test_csv_data_valid(pd_data):
 def make_highlight_func(red_inx_arr, yellow_idx_arr, blue_idx_arr, biseok_yellow_idx=None):
 
     def highlight_over_limit(row):
-        if row.승인번호 in yellow_idx_arr:
+        # 승인번호가 비어있는 경우(지출결의서 등) yellow 체크 스킵 → 한도초과 red가 가려지는 것 방지
+        if str(row.승인번호).strip() and row.승인번호 in yellow_idx_arr:
             return ["background-color: #f6bd5a; color: #ffffff"] * len(row)
 
         if biseok_yellow_idx and row.name in biseok_yellow_idx:
             return ["background-color: #f6bd5a; color: #ffffff"] * len(row)
 
-        if row.기본적요 in blue_idx_arr:
-            return ["background-color: #1e73be; color: #ffffff"] * len(row)
-
+        # 한도초과(red)는 개인카드(blue)보다 우선 적용
         if row.name in red_inx_arr:
             return ["background-color: #fa4747; color: #ffffff"] * len(row)
+
+        if row.기본적요 in blue_idx_arr:
+            return ["background-color: #1e73be; color: #ffffff"] * len(row)
 
         else:
             return [""] * len(row)
@@ -377,7 +424,19 @@ elif st.session_state.active_tab == "매칭":
                     st.session_state.approval_df = _approval
                 else:
                     st.session_state.approval_df = pd.read_excel(approval_file)
-                
+
+                # 승인금액 등 정수형이어야 할 컬럼 float → int 변환 (csv/xlsx는 NaN 포함 시 float64로 읽힘)
+                for _col in ['승인금액', '이용금액']:
+                    if _col in st.session_state.approval_df.columns:
+                        try:
+                            st.session_state.approval_df[_col] = (
+                                pd.to_numeric(st.session_state.approval_df[_col], errors='coerce')
+                                .fillna(0)
+                                .astype(int)
+                            )
+                        except Exception:
+                            pass
+
                 # 매칭된 행 하이라이트 함수
                 def highlight_matched_approval(row):
                     if row.name in st.session_state.get("matched_indices", []) and str(row['승인번호']) in st.session_state.get("matched_expense_no_set", set()):

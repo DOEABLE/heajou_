@@ -47,8 +47,11 @@ class OpenAIEmbedder(_EmbeddingFunctionBase):
         return self._name
 
     def __call__(self, input: list[str]) -> list[list[float]]:
-        resp = self.client.embeddings.create(model=self.model_name, input=input)
-        return [d.embedding for d in resp.data]
+        try:
+            resp = self.client.embeddings.create(model=self.model_name, input=input)
+            return [d.embedding for d in resp.data]
+        except Exception as e:
+            raise RuntimeError(f"OpenAI 임베딩 API 호출 실패: {e}") from e
 
 def _embedding_function():
     if _OPENAI_CLIENT:
@@ -246,6 +249,43 @@ def rag_answer(question: str, k: int = 3, show_sources: bool = False) -> tuple[s
     """
 
     # ──────────────────────────────────────────────
+    # 0-0) 팀/팀장 관련 질문 → org_info.csv 직접 처리
+    # ──────────────────────────────────────────────
+    _org_path = os.path.join(FAQDIR, "org_info.csv")
+    if os.path.exists(_org_path):
+        try:
+            _org_df = pd.read_csv(_org_path, encoding="utf-8-sig")
+            _org_df["팀명_norm"] = _org_df["팀명"].astype(str).str.strip().str.upper()
+
+            # 1) 팀장 총 인원 수
+            if re.search(r"팀장.*?(몇\s*명|몇\s*분|수|명수|인원)", question) or re.search(r"(몇\s*명|몇\s*분).*?팀장", question):
+                count = _org_df["팀장"].dropna().apply(lambda x: str(x).strip()).replace("", pd.NA).dropna().count()
+                return f"현재 등록된 팀장은 총 **{count}명**입니다.", []
+
+            # 2) 팀장 전체 목록
+            if re.search(r"팀장\s*(리스트|목록|명단|전체|다|들)", question):
+                lines = [f"- {row['팀장']} ({row['팀명']})" for _, row in _org_df.iterrows() if str(row.get('팀장', '')).strip()]
+                return "현재 등록된 팀장 목록입니다:\n\n" + "\n".join(lines), []
+
+            # 3) 특정 팀 정보 (명단, 팀장, 팀원, 구성원 등)
+            _team_kw = re.search(r"([A-Za-z가-힣0-9\-]+(?:팀|실|부문|부))", question)
+            if _team_kw and re.search(r"(명단|팀장|팀원|구성원|알려|소속|멤버|리스트|목록|몇\s*명)", question):
+                _kw = _team_kw.group(1).strip().upper()
+                _matched = _org_df[_org_df["팀명_norm"].str.contains(_kw, regex=False)]
+                if not _matched.empty:
+                    msgs = []
+                    for _, row in _matched.iterrows():
+                        msgs.append(
+                            f"**{row['팀명']}**\n"
+                            f"- 팀장: {row['팀장']}\n"
+                            f"- 팀원: {row['팀원']}\n"
+                            f"- 팀원 수: {row['팀원수']}명"
+                        )
+                    return "\n\n".join(msgs), []
+        except Exception:
+            pass
+
+    # ──────────────────────────────────────────────
     # 0) 마감일 계열 특수처리 (RAG 전에 결정론)
     # ──────────────────────────────────────────────
     if _DEADLINE_ANY.search(question):
@@ -271,7 +311,10 @@ def rag_answer(question: str, k: int = 3, show_sources: bool = False) -> tuple[s
     # ──────────────────────────────────────────────
     cli = _chroma_client()
     col = cli.get_or_create_collection("faqs", embedding_function=_embedding_function())
-    r = col.query(query_texts=[question], n_results=k)
+    try:
+        r = col.query(query_texts=[question], n_results=k)
+    except Exception as e:
+        return f"검색 중 오류가 발생했습니다: {e}", []
 
     ctx = "\n\n".join(r["documents"][0]) if r and r.get("documents") else ""
     metas = r["metadatas"][0] if r and r.get("metadatas") else []
