@@ -8,6 +8,7 @@ env/
 # local test data
 data/samples/
 data/vectorstore/
+db_data_bk.zip
 
 # local python envs
 .venv*/
