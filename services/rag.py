@@ -47,8 +47,11 @@ class OpenAIEmbedder(_EmbeddingFunctionBase):
         return self._name
 
     def __call__(self, input: list[str]) -> list[list[float]]:
-        resp = self.client.embeddings.create(model=self.model_name, input=input)
-        return [d.embedding for d in resp.data]
+        try:
+            resp = self.client.embeddings.create(model=self.model_name, input=input)
+            return [d.embedding for d in resp.data]
+        except Exception as e:
+            raise RuntimeError(f"OpenAI 임베딩 API 호출 실패: {e}") from e
 
 def _embedding_function():
     if _OPENAI_CLIENT:
@@ -246,6 +249,43 @@ def rag_answer(question: str, k: int = 3, show_sources: bool = False) -> tuple[s
     """
 
     # ──────────────────────────────────────────────
+    # 0-0) 팀/팀장 관련 질문 → org_info.csv 직접 처리
+    # ──────────────────────────────────────────────
+    _org_path = os.path.join(FAQDIR, "org_info.csv")
+    if os.path.exists(_org_path):
+        try:
+            _org_df = pd.read_csv(_org_path, encoding="utf-8-sig")
+            _org_df["팀명_norm"] = _org_df["팀명"].astype(str).str.strip().str.upper()
+
+            # 1) 팀장 총 인원 수
+            if re.search(r"팀장.*?(몇\s*명|몇\s*분|수|명수|인원)", question) or re.search(r"(몇\s*명|몇\s*분).*?팀장", question):
+                count = _org_df["팀장"].dropna().apply(lambda x: str(x).strip()).replace("", pd.NA).dropna().count()
+                return f"현재 등록된 팀장은 총 **{count}명**입니다.", []
+
+            # 2) 팀장 전체 목록
+            if re.search(r"팀장\s*(리스트|목록|명단|전체|다|들)", question):
+                lines = [f"- {row['팀장']} ({row['팀명']})" for _, row in _org_df.iterrows() if str(row.get('팀장', '')).strip()]
+                return "현재 등록된 팀장 목록입니다:\n\n" + "\n".join(lines), []
+
+            # 3) 특정 팀 정보 (명단, 팀장, 팀원, 구성원 등)
+            _team_kw = re.search(r"([A-Za-z가-힣0-9\-]+(?:팀|실|부문|부))", question)
+            if _team_kw and re.search(r"(명단|팀장|팀원|구성원|알려|소속|멤버|리스트|목록|몇\s*명)", question):
+                _kw = _team_kw.group(1).strip().upper()
+                _matched = _org_df[_org_df["팀명_norm"].str.contains(_kw, regex=False)]
+                if not _matched.empty:
+                    msgs = []
+                    for _, row in _matched.iterrows():
+                        msgs.append(
+                            f"**{row['팀명']}**\n"
+                            f"- 팀장: {row['팀장']}\n"
+                            f"- 팀원: {row['팀원']}\n"
+                            f"- 팀원 수: {row['팀원수']}명"
+                        )
+                    return "\n\n".join(msgs), []
+        except Exception:
+            pass
+
+    # ──────────────────────────────────────────────
     # 0) 마감일 계열 특수처리 (RAG 전에 결정론)
     # ──────────────────────────────────────────────
     if _DEADLINE_ANY.search(question):
@@ -271,7 +311,10 @@ def rag_answer(question: str, k: int = 3, show_sources: bool = False) -> tuple[s
     # ──────────────────────────────────────────────
     cli = _chroma_client()
     col = cli.get_or_create_collection("faqs", embedding_function=_embedding_function())
-    r = col.query(query_texts=[question], n_results=k)
+    try:
+        r = col.query(query_texts=[question], n_results=k)
+    except Exception as e:
+        return f"검색 중 오류가 발생했습니다: {e}", []
 
     ctx = "\n\n".join(r["documents"][0]) if r and r.get("documents") else ""
     metas = r["metadatas"][0] if r and r.get("metadatas") else []
@@ -442,6 +485,16 @@ def match_corporate_card(approval_df: pd.DataFrame, expense_df: pd.DataFrame, li
     # 승인내역에서 매칭된 행 인덱스 저장
     matched_approval_indices = []
 
+    # 새 양식 감지: '이용자명' 컬럼 있고 '승인시간' 없음 (재무기획실 통합 양식)
+    is_new_format = '이용자명' in approval_df.columns and '승인시간' not in approval_df.columns
+
+    if is_new_format:
+        # 사용자명으로 해당 직원 행만 필터링
+        user_name = str(expense_df['사용자'].iloc[0]).strip() if '사용자' in expense_df.columns else ''
+        user_approval_df = approval_df[approval_df['이용자명'].astype(str).str.strip() == user_name]
+    else:
+        user_approval_df = approval_df
+
     # 각 지출결의 행 처리
     for idx, exp_row in expense_df.iterrows():
         basic_summary = str(exp_row.get('기본적요', ''))
@@ -472,24 +525,64 @@ def match_corporate_card(approval_df: pd.DataFrame, expense_df: pd.DataFrame, li
 
         # 법인카드인 경우 승인내역과 매칭
         if '법카' in basic_summary:
-            exp_time = str(exp_row.get('승인시간', ''))
+            if is_new_format:
+                # 날짜 정규화 (2026-02-26(수) → 20260226)
+                exp_date = str(exp_row.get('증빙일자', ''))
+                if '(' in exp_date:
+                    exp_date = exp_date.split('(')[0]
+                exp_date_normalized = exp_date.replace('-', '').replace('.', '').strip()
 
-            # 승인내역에서 동일 시간 찾기
-            for app_idx, app_row in approval_df.iterrows():
-                if str(app_row.get('승인시간', '')) == exp_time and exp_time != '':
-                    # 날짜 형식 변환 및 비교
-                    exp_date = str(exp_row.get('증빙일자', ''))
-                    # "2025-09-04(목)" 형식에서 날짜만 추출
-                    if '(' in exp_date:
-                        exp_date = exp_date.split('(')[0]
-                    exp_date = exp_date.replace('-', '.')
+                is_biseok = str(exp_row.get('증빙유형', '')).strip() == '법인카드(비과세)'
 
-                    app_date = str(app_row.get('승인일', ''))
-                    if exp_date == app_date:
-                        # 승인번호 매칭
+                try:
+                    exp_amount_int = int(float(str(exp_row.get('합계', '')).replace(',', '')))
+                except (ValueError, TypeError):
+                    exp_amount_int = 0
+
+                exp_amount = str(exp_amount_int)
+
+                for app_idx, app_row in user_approval_df.iterrows():
+                    # 이용자명 재확인 (안전장치: 필터 후에도 이름 불일치 방지)
+                    app_user = str(app_row.get('이용자명', '')).strip()
+                    if user_name and app_user != user_name:
+                        continue
+
+                    app_date = str(app_row.get('승인일', '')).replace('-', '').replace('.', '').strip()
+
+                    if exp_date_normalized != app_date:
+                        continue
+
+                    if is_biseok:
+                        # 법인카드(비과세): 이용자명(필터로 보장) + 날짜 일치로 매칭
                         expense_df.at[idx, '승인번호'] = str(app_row.get('승인번호', ''))
                         matched_approval_indices.append(app_idx)
                         break
+                    else:
+                        # 법인카드(과세): 날짜 + 금액 정확히 일치
+                        try:
+                            app_amount_int = int(float(str(app_row.get('승인금액', '')).replace(',', '')))
+                        except (ValueError, TypeError):
+                            app_amount_int = 0
+                        if str(app_amount_int) == exp_amount:
+                            expense_df.at[idx, '승인번호'] = str(app_row.get('승인번호', ''))
+                            matched_approval_indices.append(app_idx)
+                            break
+            else:
+                # 기존 양식: 승인시간으로 매칭
+                exp_time = str(exp_row.get('승인시간', ''))
+
+                for app_idx, app_row in approval_df.iterrows():
+                    if str(app_row.get('승인시간', '')) == exp_time and exp_time != '':
+                        exp_date = str(exp_row.get('증빙일자', ''))
+                        if '(' in exp_date:
+                            exp_date = exp_date.split('(')[0]
+                        exp_date = exp_date.replace('-', '.')
+
+                        app_date = str(app_row.get('승인일', ''))
+                        if exp_date == app_date:
+                            expense_df.at[idx, '승인번호'] = str(app_row.get('승인번호', ''))
+                            matched_approval_indices.append(app_idx)
+                            break
 
     return expense_df, matched_approval_indices
 
