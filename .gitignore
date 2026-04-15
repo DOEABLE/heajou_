@@ -8,7 +8,6 @@ env/
 # local test data
 data/samples/
 data/vectorstore/
-db_data_bk.zip
 
 # local python envs
 .venv*/
@@ -27,9 +26,8 @@ __pycache__/
 Thumbs.db
 
 # Environment files
-services/.env
+.env
 .env.*
-
 
 # Google credentials
 *-credentials.json
