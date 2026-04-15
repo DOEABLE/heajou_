@@ -71,9 +71,12 @@ def yellow_highliter(cardlog, doclog):
 
 
 def blue_highliter(doclog):
-    blue_data = []
     blue_data = doclog.loc[
         doclog['기본적요'].astype(str).str.contains('개인', na=False),
+        '기본적요'
+    ].tolist()
+    blue_data += doclog.loc[
+        doclog['기본적요'].astype(str).str.strip().str[:4] == '8563',
         '기본적요'
     ].tolist()
     print("blue_data >>>", blue_data)
@@ -142,6 +145,29 @@ def get_comm_limit_8363(user_name):
     return None
 
 
+def get_comm_limit_8563(user_name):
+    """
+    사업개발 본부 외의 팀의 팀장의 통신비 지급에 대한 정합성 체크
+    """
+    csv_path = os.path.join(os.path.dirname(__file__), "..", "data", "vectorstore", "org_info.csv")
+    try:
+        from update_org_counts import update_counts
+        df = update_counts(csv_path)
+    except Exception:
+        df = pd.read_csv(csv_path, encoding='utf-8-sig')
+
+    user_name = str(user_name).strip()
+    df["팀장"] = df["팀장"].astype(str).str.strip()
+
+    leader_match =df[df["팀장"] == user_name]
+    if not leader_match.empty:
+        team_name = str(leader_match.iloc[0]["팀명"])
+        if any(kw in team_name for kw in SPECIAL_TEAM_KEYWORDS):
+            return None
+        return 60000
+    return None
+
+
 def test_all_data(pd_data):
     df = pd_data
 
@@ -165,7 +191,8 @@ def test_all_data(pd_data):
     # 업무추진비 조건 필터링
     valid_conditions = [
         "8029 / (판) 법카 - 업무추진비(기타)",
-        "8031 / (판) 법카 - 업무추진비(식대)"
+        "8031 / (판) 법카 - 업무추진비(식대)",
+        "8529 / (경상) 법카 - 업무추진비(기타)"
     ]
     filtered = df[df["기본적요"].isin(valid_conditions)]
 
